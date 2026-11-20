@@ -158,6 +158,9 @@ jobs:
             fetch --depth 1 "https://$GITLAB_HOST/$GITLAB_PATH" "$SHA"
           git -C src checkout -q FETCH_HEAD
           echo "BUILT_SHA=$(git -C src rev-parse HEAD)" >> "$GITHUB_ENV"
+          # Yig'ilgan vaqt BIR MARTA olinadi: ilova ichiga (BUILD_TIME) va
+          # reliz matniga («Yig'ilgan:») bir xil qiymat yoziladi.
+          echo "BUILD_TIME=$(date -u +%Y-%m-%d' '%H:%M) UTC" >> "$GITHUB_ENV"
 
       # Printer PowerShell skriptlarining sintaksisi HAQIQIY Windows'da
       # tekshiriladi (ishga TUSHIRILMAYDI). Xato bo'lsa build shu yerda to'xtaydi.
@@ -201,7 +204,9 @@ jobs:
 
       - name: Qurish
         working-directory: src
-        run: flutter build windows --release
+        # GIT_SHA/BUILD_TIME — kassa o'z build'ini biladi va Sozlamalar →
+        # «Yangilash» shu relizdagi SHA bilan solishtiradi.
+        run: flutter build windows --release "--dart-define=GIT_SHA=$BUILT_SHA" "--dart-define=BUILD_TIME=$BUILD_TIME"
 
       # Flutter MSVC runtime'ni o'zi nusxalamaydi (windows/CMakeLists.txt
       # qo'shadi). Yo'qolsa ilova toza Windows'da JIM ochilmaydi.
@@ -254,7 +259,7 @@ jobs:
           raqamli imzolanmagan, virus emas).
 
           Versiya: ${VER}
-          Yig'ilgan: $(date -u +%Y-%m-%d' '%H:%M) UTC
+          Yig'ilgan: ${BUILD_TIME}
           Manba: ${REF}
           SHA: ${BUILT_SHA}
           EOF
