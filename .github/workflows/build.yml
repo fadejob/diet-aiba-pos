@@ -158,6 +158,17 @@ jobs:
             fetch --depth 1 "https://$GITLAB_HOST/$GITLAB_PATH" "$SHA"
           git -C src checkout -q FETCH_HEAD
           echo "BUILT_SHA=$(git -C src rev-parse HEAD)" >> "$GITHUB_ENV"
+          # VERSIYA = 1.0.<main'dagi commitlar soni>. Har yangi commit bilan
+          # o'zi o'sadi, qo'lda oshirish kerak emas, bir commit — doim bir
+          # xil raqam. Buning uchun faqat commit tarixi olinadi (fayllarsiz,
+          # `tree:0` — bir necha soniya).
+          git -C src -c "http.extraHeader=Authorization: Basic $AUTH" \
+            fetch -q --unshallow --filter=tree:0 "https://$GITLAB_HOST/$GITLAB_PATH" "$SHA"
+          N=$(git -C src rev-list --count HEAD)
+          [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt 1 ] || { echo "::error::commit soni noto'g'ri: $N"; exit 1; }
+          echo "BUILD_NO=$N" >> "$GITHUB_ENV"
+          echo "VER=1.0.$N" >> "$GITHUB_ENV"
+          echo "Versiya: 1.0.$N"
           # Yig'ilgan vaqt BIR MARTA olinadi: ilova ichiga (BUILD_TIME) va
           # reliz matniga («Yig'ilgan:») bir xil qiymat yoziladi.
           echo "BUILD_TIME=$(date -u +%Y-%m-%d' '%H:%M) UTC" >> "$GITHUB_ENV"
@@ -204,9 +215,9 @@ jobs:
 
       - name: Qurish
         working-directory: src
-        # GIT_SHA/BUILD_TIME — kassa o'z build'ini biladi va Sozlamalar →
-        # «Yangilash» shu relizdagi SHA bilan solishtiradi.
-        run: flutter build windows --release "--dart-define=GIT_SHA=$BUILT_SHA" "--dart-define=BUILD_TIME=$BUILD_TIME"
+        # APP_VERSION/GIT_SHA/BUILD_TIME — kassa o'z versiyasini biladi va
+        # Sozlamalar → «Yangilash» relizdagi `Versiya:` bilan solishtiradi.
+        run: flutter build windows --release "--build-name=$VER" "--build-number=$BUILD_NO" "--dart-define=APP_VERSION=$VER" "--dart-define=GIT_SHA=$BUILT_SHA" "--dart-define=BUILD_TIME=$BUILD_TIME"
 
       # Flutter MSVC runtime'ni o'zi nusxalamaydi (windows/CMakeLists.txt
       # qo'shadi). Yo'qolsa ilova toza Windows'da JIM ochilmaydi.
@@ -223,9 +234,6 @@ jobs:
 
       - name: Inno Setup
         run: choco install innosetup -y --no-progress
-
-      - name: Versiyani o'qish
-        run: echo "VER=$(grep -m1 '^version:' src/pubspec.yaml | awk '{print $2}' | cut -d+ -f1 | tr -d '\r')" >> "$GITHUB_ENV"
 
       # PowerShell'da: Git Bash `/DAppVersion=..` ni fayl yo'liga aylantirib
       # yuborib, iscc «more than one script filename» deb yiqilardi.
@@ -252,13 +260,14 @@ jobs:
           EXE=$(ls src/windows/Output/*.exe)
           NAME=$(basename "$EXE")
           cat > notes.md <<EOF
+          Versiya: ${VER}
+
           Windows o'rnatuvchisi (64-bit Windows 10 / 11).
 
           Faylni yuklab, ikki marta bosing. Windows «noma'lum nashriyot»
           desa: **Batafsil -> Baribir ishga tushirish** (o'rnatuvchi
           raqamli imzolanmagan, virus emas).
 
-          Versiya: ${VER}
           Yig'ilgan: ${BUILD_TIME}
           Manba: ${REF}
           SHA: ${BUILT_SHA}
@@ -273,4 +282,4 @@ jobs:
           done
           # SHA matni ENG OXIRIDA yoziladi: build to'liq tugamasa «yig'ilgan»
           # deb belgilanib qolmaydi va keyingi tekshiruvda qayta uriniladi.
-          gh release edit latest --notes-file notes.md --latest
+          gh release edit latest --title "DIET-AIBA POS v${VER}" --notes-file notes.md --latest
