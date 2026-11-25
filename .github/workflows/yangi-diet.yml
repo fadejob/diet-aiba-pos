@@ -1,0 +1,250 @@
+# YANGI DIET (C# / .NET) — o'rnatuvchini yig'ish va Release'ga qo'yish.
+#
+# build.yml (Flutter DIET) bilan BIR XIL ishlaydi, faqat:
+#   * manba — GitLab'dagi `yangi-diet` shoxi (Flutter — `main`);
+#   * Release tegi — `yangi-diet` (Flutter — `latest`). Flutter kassalar faqat
+#     `latest` tegini o'qiydi (updater_service.dart: releases/tags/latest),
+#     shuning uchun bu relizni KO'RMAYDI. Reliz «prerelease» va «Latest» EMAS:
+#     README'dagi releases/latest havolasi Flutter'nikida qoladi;
+#   * versiya 2.0.<commitlar soni> (Flutter — 1.0.<N>);
+#   * tekshiruv: `dotnet test` (1495 test). Qizil bo'lsa — chiqmaydi;
+#   * Release'da o'rnatuvchi + latest.json — C# ilova o'zi shu yerdan
+#     yangilanadi (DietPos.Core/Update: releases/download/yangi-diet/latest.json).
+#
+# BU REPODA KOD YO'Q. Kod build paytida GitLab'dan vaqtincha olinadi.
+# Har 15 daqiqada GitLab `yangi-diet` tekshiriladi: SHA oxirgi yig'ilganidan
+# farq qilsa build ketadi. Oxirgi yig'ilgan SHA `yangi-diet` Release matnida.
+# Secret'lar — build.yml bilan umumiy (GITLAB_USER, GITLAB_TOKEN), yangisi kerak emas.
+#
+# XAVFSIZLIK (build.yml qoidalari):
+#  * Triggerlar faqat schedule va qo'lda: pull request / fork secret'larga
+#    yeta olmaydi.
+#  * Standart ruxsat YO'Q (`permissions: {}`), har ish o'zi keraklisini oladi.
+#  * Uchinchi tomon action ishlatilmaydi.
+#  * GitLab kaliti klon URL'ida emas, vaqtinchalik HTTP sarlavhada; log'da
+#    yashirinadi; `.git/config` ga yozilmaydi.
+#  * Kalit yo'q yoki GitLab javob bermasa ish QIZIL bo'ladi.
+
+name: Yangi DIET (C#)
+
+on:
+  schedule:
+    # build.yml (*/15) bilan bir daqiqaga tushmasin.
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "GitLab shoxi (odatda yangi-diet)"
+        default: yangi-diet
+      force:
+        description: "SHA o'zgarmagan bo'lsa ham qayta yig'ilsin"
+        type: boolean
+        default: false
+
+permissions: {}
+
+# build.yml bilan alohida navbat — bir-birini kutmaydi.
+concurrency:
+  group: build-yangi-diet
+  cancel-in-progress: false
+
+env:
+  GITLAB_HOST: gitlab.aiba.uz
+  GITLAB_PATH: ${{ vars.YANGI_DIET_GITLAB_PATH || 'j.xamroyev/diet-aiba-pos.git' }}
+  TAG: yangi-diet
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Release matnini o'qish
+    outputs:
+      changed: ${{ steps.cmp.outputs.changed }}
+      sha: ${{ steps.cmp.outputs.sha }}
+      ref: ${{ steps.cmp.outputs.ref }}
+    steps:
+      - id: cmp
+        env:
+          GL_USER: ${{ secrets.GITLAB_USER }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          REF: ${{ github.event.inputs.ref || 'yangi-diet' }}
+          FORCE: ${{ github.event.inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GL_USER" ] || [ -z "$GL_TOKEN" ]; then
+            echo "::error::GITLAB_USER / GITLAB_TOKEN secret qo'yilmagan (SOZLASH.md)"
+            exit 1
+          fi
+          [[ "$REF" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::noto'g'ri ref"; exit 1; }
+          AUTH=$(printf '%s:%s' "$GL_USER" "$GL_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
+
+          SHA=$(git -c "http.extraHeader=Authorization: Basic $AUTH" \
+            ls-remote "https://$GITLAB_HOST/$GITLAB_PATH" "refs/heads/$REF" | head -1 | cut -f1)
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::GitLab'da $REF topilmadi yoki kirish rad etildi"; exit 1; }
+          echo "GitLab $REF = $SHA"
+
+          PREV=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null \
+                 | grep -oE 'SHA: [0-9a-f]{40}' | head -1 | cut -d' ' -f2 || true)
+          echo "Oxirgi yig'ilgan: ${PREV:-yoq}"
+
+          CH=false
+          [ "$SHA" != "$PREV" ] && CH=true
+          [ "$FORCE" = "true" ] && CH=true
+          echo "changed=$CH" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"    >> "$GITHUB_OUTPUT"
+          echo "ref=$REF"    >> "$GITHUB_OUTPUT"
+          [ "$CH" = true ] && echo "Yangi commit bor: build ketadi." || echo "Yangilik yo'q."
+
+  windows:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write # yangi-diet Release'ini yaratish/yangilash
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Kodni GitLab'dan olish (aniq commit)
+        env:
+          GL_USER: ${{ secrets.GITLAB_USER }}
+          GL_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::noto'g'ri SHA"; exit 1; }
+          AUTH=$(printf '%s:%s' "$GL_USER" "$GL_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
+          git init -q src
+          git -C src -c "http.extraHeader=Authorization: Basic $AUTH" \
+            fetch --depth 1 "https://$GITLAB_HOST/$GITLAB_PATH" "$SHA"
+          git -C src checkout -q FETCH_HEAD
+          echo "BUILT_SHA=$(git -C src rev-parse HEAD)" >> "$GITHUB_ENV"
+          # VERSIYA = 2.0.<yangi-diet dagi commitlar soni> (build.yml: 1.0.<N>).
+          # Har yangi commit bilan o'zi o'sadi; faqat commit tarixi olinadi.
+          git -C src -c "http.extraHeader=Authorization: Basic $AUTH" \
+            fetch -q --unshallow --filter=tree:0 "https://$GITLAB_HOST/$GITLAB_PATH" "$SHA"
+          N=$(git -C src rev-list --count HEAD)
+          [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt 1 ] || { echo "::error::commit soni noto'g'ri: $N"; exit 1; }
+          echo "VER=2.0.$N" >> "$GITHUB_ENV"
+          echo "Versiya: 2.0.$N"
+          echo "BUILD_TIME=$(date -u +%Y-%m-%d' '%H:%M) UTC" >> "$GITHUB_ENV"
+
+      # Kassa Toshkent vaqtida ishlaydi; testlar ham shu soat mintaqasida
+      # (kun chegarasi, chek raqami) — runner'ning UTC si emas.
+      - name: Soat mintaqasi (Toshkent)
+        shell: pwsh
+        run: tzutil /s "West Asia Standard Time"; tzutil /g
+
+      - name: .NET 9 SDK
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "dotnet"
+          $inst = Join-Path $env:RUNNER_TEMP "dotnet-install.ps1"
+          Invoke-WebRequest "https://dot.net/v1/dotnet-install.ps1" -OutFile $inst
+          & $inst -Channel 9.0 -InstallDir $dir
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          "DOTNET_ROOT=$dir" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "DOTNET_CLI_TELEMETRY_OPTOUT=1" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "DOTNET_NOLOGO=1" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & "$dir\dotnet.exe" --version
+
+      - name: Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build
+        shell: pwsh
+        working-directory: src
+        run: |
+          dotnet build DietPos.sln -c Release
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::dotnet build yiqildi"; exit 1 }
+
+      - name: Testlar
+        shell: pwsh
+        working-directory: src
+        run: |
+          dotnet test tests\DietPos.Tests -c Release --no-build
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::testlar yiqildi - reliz chiqmaydi"; exit 1 }
+
+      # PowerShell 5.1 skript (faqat ASCII): dotnet publish (self-contained,
+      # ReadyToRun) + Inno Setup. Natija: artifacts\installer\DietPos-Setup-<VER>.exe
+      - name: O'rnatuvchi
+        shell: pwsh
+        working-directory: src
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1 -Version $env:VER -BuildTime "$env:BUILD_TIME"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::o'rnatuvchi yig'ilmadi"; exit 1 }
+          $name = "DietPos-Setup-$env:VER.exe"
+          $exe = "artifacts\installer\$name"
+          $size = (Get-Item $exe).Length
+          if ($size -lt 5000000) { Write-Host "::error::$name atigi $size bayt"; exit 1 }
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          # Kassa o'qiydigan manifest (ReleaseRules.ParseManifest).
+          $json = ([ordered]@{ version = $env:VER; file = $name; sha256 = $sha; size = $size; commit = $env:BUILT_SHA; built_at = $env:BUILD_TIME } | ConvertTo-Json -Compress)
+          [IO.File]::WriteAllText((Join-Path (Get-Location) "artifacts\installer\latest.json"), $json, (New-Object Text.UTF8Encoding $false))
+          Write-Host "Manifest: $json"
+          "EXE_SHA=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      # Release: standart `gh` bilan. Havola o'zgarmaydi:
+      # .../releases/download/yangi-diet/latest.json
+      - name: Release'ga qo'yish (teg yangi-diet)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: ${{ needs.check.outputs.ref }}
+        run: |
+          set -euo pipefail
+          EXE="src/artifacts/installer/DietPos-Setup-${VER}.exe"
+          MAN="src/artifacts/installer/latest.json"
+          NAME=$(basename "$EXE")
+          cat > notes.md <<EOF
+          Versiya: ${VER}
+
+          YANGI DIET (C# / .NET) — sinov. Flutter DIET'ning o'rnatuvchisi
+          «latest» relizida: https://github.com/${GH_REPO}/releases/latest
+
+          O'rnatilgan ilova shu yerdan o'zi yangilanadi (latest.json).
+
+          Yig'ilgan: ${BUILD_TIME}
+          Manba: ${REF}
+          SHA: ${BUILT_SHA}
+          EOF
+
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "Yangi DIET (C#) — o'rnatuvchi" --notes "tayyorlanmoqda" --prerelease --latest=false
+          # AVVAL o'rnatuvchi, KEYIN manifest: manifest yangi versiyani
+          # ko'rsatgan paytda fayl allaqachon joyida bo'lsin.
+          gh release upload "$TAG" "$EXE" --clobber
+          gh release upload "$TAG" "$MAN" --clobber
+          # Eski versiyali fayllar qolib ketmasin.
+          for a in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
+            [ "$a" = "$NAME" ] || [ "$a" = "latest.json" ] || gh release delete-asset "$TAG" "$a" -y
+          done
+          # SHA matni ENG OXIRIDA yoziladi: build to'liq tugamasa «yig'ilgan»
+          # deb belgilanib qolmaydi va keyingi tekshiruvda qayta uriniladi.
+          gh release edit "$TAG" --title "Yangi DIET (C#) v${VER}" --notes-file notes.md --prerelease --latest=false
+
+      # Kassa ko'zi bilan (tokensiz) tekshiruv: manifest yangi versiyani
+      # beradimi va fayl SHA'si mosmi.
+      - name: Kassa ko'zi bilan tekshirish
+        env:
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${GH_REPO}/releases/download/${TAG}"
+          for i in 1 2 3 4 5 6; do
+            J=$(curl -sSL -m 60 -H "Cache-Control: no-cache" "$BASE/latest.json" || true)
+            V=$(printf '%s' "$J" | grep -oE '"version":"[0-9.]+"' | cut -d'"' -f4 || true)
+            S=$(printf '%s' "$J" | grep -oE '"sha256":"[0-9a-f]{64}"' | cut -d'"' -f4 || true)
+            GOT="$V $S"
+            [ "$GOT" = "$VER $EXE_SHA" ] && break
+            echo "manifest hali eski ($GOT), 10 s kutiladi..."; sleep 10
+          done
+          [ "$GOT" = "$VER $EXE_SHA" ] || { echo "::error::kassa manifestda $VER ni ko'rmayapti: $GOT"; exit 1; }
+          curl -sSL --fail -m 600 -o check.exe "$BASE/DietPos-Setup-${VER}.exe"
+          BACK=$(sha256sum check.exe | cut -d' ' -f1)
+          [ "$BACK" = "$EXE_SHA" ] || { echo "::error::yuklangan fayl SHA si mos emas"; exit 1; }
+          echo "TAYYOR: v$VER kassalar uchun ochiq ($BASE/latest.json)"
